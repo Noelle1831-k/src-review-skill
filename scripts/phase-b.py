@@ -441,6 +441,92 @@ def fetch_batch(batch_ids):
 
 
 # ============================================================
+#  Attachment-only refresh (Phase B1.5) — lighter than full fetch
+# ============================================================
+
+def fetch_attachments_only(batch_ids):
+    """Open detail pages and extract ONLY attachment links (skip body extraction).
+    Returns {vid: [attachment_dicts]} for IDs that have attachments."""
+
+    tabs = {}
+
+    # Open tabs — same as fetch_batch but skip body extraction
+    for vid in batch_ids:
+        resp = json.loads(urllib.request.urlopen(
+            urllib.request.Request(f'{CDP}/json/new', method='PUT')
+        ).read())
+        ws = create_connection(resp['webSocketDebuggerUrl'])
+        tabs[vid] = ws
+        ws.send(json.dumps({'id': 1, 'method': 'Page.navigate',
+            'params': {'url': f'https://src.bytedance.net/vul-detail/{vid}'}}))
+        json.loads(ws.recv())
+        time.sleep(0.3)
+
+    # Wait for pages to load (lighter check — just need DOM, not full body)
+    for _ in range(20):
+        all_ready = True
+        for vid, ws in tabs.items():
+            try:
+                title = js(ws, 'document.title') or ''
+                if not title or 'SSO' in title:
+                    all_ready = False
+                    break
+            except:
+                all_ready = False
+                break
+        if all_ready:
+            break
+        time.sleep(0.5)
+
+    time.sleep(1.5)
+
+    # Extract attachment links only
+    results = {}
+    for vid, ws in tabs.items():
+        try:
+            cookie_str = get_cookies(ws)
+            captured = js(ws, '''(function() {
+                return new Promise(function(resolve) {
+                    var result = [];
+                    var containers = document.querySelectorAll('[class*="attachment-operation-container"]');
+                    if (containers.length === 0) { resolve(result); return; }
+                    var origOpen = window.open;
+                    var pending = containers.length;
+                    containers.forEach(function(container, idx) {
+                        var nameEl = container.querySelector('[class*="attachment-name"]');
+                        var filename = nameEl ? nameEl.textContent.trim() : ('attachment_' + idx);
+                        window.open = function(url) {
+                            result.push({filename: filename, url: url});
+                            pending--;
+                            if (pending === 0) { window.open = origOpen; resolve(result); }
+                            return null;
+                        };
+                        container.click();
+                    });
+                    setTimeout(function() { window.open = origOpen; resolve(result); }, 3000);
+                });
+            })()''', await_promise=True)
+
+            if captured:
+                for att in captured:
+                    att['url'] = 'https://src.bytedance.net' + att['url']
+                results[vid] = captured
+        except Exception as e:
+            print(f'    [!] {vid}: attachment check error: {e}')
+
+    # Close tabs
+    for vid, ws in tabs.items():
+        try:
+            ws.send(json.dumps({'id': 99, 'method': 'Page.close'}))
+            json.loads(ws.recv())
+        except:
+            pass
+        ws.close()
+
+    return results
+
+
+# ============================================================
 #  Main
 # ============================================================
 
@@ -479,6 +565,58 @@ if new_ids:
         time.sleep(1)
 else:
     print('\n  (no fetching needed)')
+
+# --- Phase B1.5: Refresh attachments for cached IDs ---
+cache = load_cache()  # ensure cache is loaded for B1.5 reference
+ATTACH_REFRESH_COOLDOWN_H = 4  # don't re-check attachments within 4 hours
+now_ts = datetime.now().timestamp()
+
+if cached_results:
+    # Determine which cached IDs need attachment re-check
+    recheck_ids = []
+    for vid in sorted(cached_results.keys()):
+        entry = cache.get(vid, {})
+        last_check = entry.get('attachments_checked_at')
+        has_local = entry.get('attachment_names', [])
+        # Re-check if: never checked, or cooldown passed, or had no attachments before
+        if not last_check or (now_ts - last_check) > ATTACH_REFRESH_COOLDOWN_H * 3600:
+            recheck_ids.append(vid)
+
+    if recheck_ids:
+        print(f'\n--- Phase B1.5: Attachment refresh for {len(recheck_ids)} cached IDs ---')
+        batches = [recheck_ids[i:i+BATCH_SIZE] for i in range(0, len(recheck_ids), BATCH_SIZE)]
+        new_attach_total = 0
+        for i, batch in enumerate(batches):
+            print(f'  Refresh batch {i+1}/{len(batches)}: {batch}')
+            refreshed = fetch_attachments_only(batch)
+            for vid, new_atts in refreshed.items():
+                if new_atts:
+                    existing = all_results.get(vid, {}).get('attachments', [])
+                    existing_names = {a['filename'] for a in existing}
+                    fresh = [a for a in new_atts if a['filename'] not in existing_names]
+                    if fresh:
+                        # Download new attachments
+                        safe_title = re.sub(r'[<>:"/\\|?*]', '_', all_results[vid]["title"])[:80]
+                        folder = os.path.join(ATTACH_DIR, f'{vid}_{safe_title}')
+                        for att in fresh:
+                            att['local_path'] = os.path.join(folder, att['filename'])
+                        new_attach_total += len(fresh)
+                        if vid in all_results:
+                            all_results[vid].setdefault('attachments', []).extend(fresh)
+                        print(f'    [{vid}] +{len(fresh)} new attachments')
+                # Update last check timestamp regardless
+                if vid in cache:
+                    cache[vid]['attachments_checked_at'] = now_ts
+                    cache[vid]['attachment_names'] = [
+                        a['filename'] for a in all_results.get(vid, {}).get('attachments', [])
+                    ]
+            time.sleep(1)
+        if new_attach_total == 0:
+            print(f'  No new attachments found')
+        else:
+            print(f'  Total new attachments: {new_attach_total}')
+    else:
+        print(f'\n--- Phase B1.5: Attachment refresh skipped (all within {ATTACH_REFRESH_COOLDOWN_H}h cooldown) ---')
 
 # --- Phase B2: Post-process attachments ---
 n_unzipped, n_converted = process_attachments()
