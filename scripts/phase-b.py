@@ -446,7 +446,7 @@ def fetch_batch(batch_ids):
 
 def fetch_attachments_only(batch_ids):
     """Open detail pages and extract ONLY attachment links (skip body extraction).
-    Returns {vid: [attachment_dicts]} for IDs that have attachments."""
+    Returns (results, cookie_str) — attachment URLs dict and cookies for downloading."""
 
     tabs = {}
 
@@ -462,13 +462,13 @@ def fetch_attachments_only(batch_ids):
         json.loads(ws.recv())
         time.sleep(0.3)
 
-    # Wait for pages to load (lighter check — just need DOM, not full body)
-    for _ in range(20):
+    # Wait for pages to load (match B1 timeout: 40 × 0.5s = 20s)
+    for _ in range(40):
         all_ready = True
         for vid, ws in tabs.items():
             try:
                 title = js(ws, 'document.title') or ''
-                if not title or 'SSO' in title:
+                if not title or 'SSO' in title or title == 'about:blank':
                     all_ready = False
                     break
             except:
@@ -480,11 +480,25 @@ def fetch_attachments_only(batch_ids):
 
     time.sleep(1.5)
 
-    # Extract attachment links only
+    # Retry any tabs that didn't load properly
+    for vid, ws in list(tabs.items()):
+        try:
+            title = js(ws, 'document.title') or ''
+            if not title or 'SSO' in title or title == 'about:blank':
+                ws.send(json.dumps({'id': 99, 'method': 'Page.navigate',
+                    'params': {'url': f'https://src.bytedance.net/vul-detail/{vid}'}}))
+                json.loads(ws.recv())
+                time.sleep(3)
+        except:
+            pass
+
+    # Extract attachment links and cookies (one cookie_str for all, same domain)
     results = {}
+    cookie_str = ''
     for vid, ws in tabs.items():
         try:
-            cookie_str = get_cookies(ws)
+            if not cookie_str:
+                cookie_str = get_cookies(ws)
             captured = js(ws, '''(function() {
                 return new Promise(function(resolve) {
                     var result = [];
@@ -523,7 +537,7 @@ def fetch_attachments_only(batch_ids):
             pass
         ws.close()
 
-    return results
+    return results, cookie_str
 
 
 # ============================================================
@@ -577,8 +591,7 @@ if cached_results:
     for vid in sorted(cached_results.keys()):
         entry = cache.get(vid, {})
         last_check = entry.get('attachments_checked_at')
-        has_local = entry.get('attachment_names', [])
-        # Re-check if: never checked, or cooldown passed, or had no attachments before
+        # Re-check if: never checked, or cooldown passed
         if not last_check or (now_ts - last_check) > ATTACH_REFRESH_COOLDOWN_H * 3600:
             recheck_ids.append(vid)
 
@@ -588,7 +601,7 @@ if cached_results:
         new_attach_total = 0
         for i, batch in enumerate(batches):
             print(f'  Refresh batch {i+1}/{len(batches)}: {batch}')
-            refreshed = fetch_attachments_only(batch)
+            refreshed, cookie_str = fetch_attachments_only(batch)
             for vid, new_atts in refreshed.items():
                 if new_atts:
                     existing = all_results.get(vid, {}).get('attachments', [])
@@ -598,8 +611,19 @@ if cached_results:
                         # Download new attachments
                         safe_title = re.sub(r'[<>:"/\\|?*]', '_', all_results[vid]["title"])[:80]
                         folder = os.path.join(ATTACH_DIR, f'{vid}_{safe_title}')
+                        os.makedirs(folder, exist_ok=True)
                         for att in fresh:
-                            att['local_path'] = os.path.join(folder, att['filename'])
+                            full_url = att['url']
+                            try:
+                                req = urllib.request.Request(full_url, headers={'Cookie': cookie_str})
+                                data = urllib.request.urlopen(req, timeout=30).read()
+                                filepath = os.path.join(folder, att['filename'])
+                                with open(filepath, 'wb') as f:
+                                    f.write(data)
+                                att['local_path'] = filepath
+                                att['size'] = len(data)
+                            except Exception as e:
+                                att['error'] = str(e)[:200]
                         new_attach_total += len(fresh)
                         if vid in all_results:
                             all_results[vid].setdefault('attachments', []).extend(fresh)
@@ -611,6 +635,8 @@ if cached_results:
                         a['filename'] for a in all_results.get(vid, {}).get('attachments', [])
                     ]
             time.sleep(1)
+        # Save cache after B1.5 so B3 doesn't lose B1.5 metadata
+        save_cache(cache)
         if new_attach_total == 0:
             print(f'  No new attachments found')
         else:
@@ -629,7 +655,7 @@ now = datetime.now().isoformat(timespec='seconds')
 for vid in stale_ids:
     cache.pop(vid, None)
 
-# Upsert current entries (preserve existing reproduced flag)
+# Upsert current entries (preserve existing reproduced flag + B1.5 metadata)
 for vid, r in all_results.items():
     prev = cache.get(vid, {})
     cache[vid] = {
@@ -642,6 +668,11 @@ for vid, r in all_results.items():
     # Preserve reproduced flag if already set
     if prev.get('reproduced'):
         cache[vid]['reproduced'] = True
+    # Preserve B1.5 attachment tracking fields
+    if prev.get('attachments_checked_at'):
+        cache[vid]['attachments_checked_at'] = prev['attachments_checked_at']
+    if prev.get('attachment_names'):
+        cache[vid]['attachment_names'] = prev['attachment_names']
 save_cache(cache)
 
 # Save details
