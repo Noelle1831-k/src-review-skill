@@ -7,7 +7,8 @@ SCRIPTS_DIR="/tmp"
 
 echo "Installing SRC Review Skill..."
 
-# Create skill directory
+# Clean previous installation
+rm -rf "$SKILL_DIR"
 mkdir -p "$SKILL_DIR"
 
 # Copy skill definition

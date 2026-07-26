@@ -62,7 +62,7 @@ python3 /tmp/src_detail_batch.py
 | `SKILL.md` | Skill definition for Claude Code |
 | `scripts/phase-a.py` | SRC list collection via CDP |
 | `scripts/phase-b.py` | Detail fetching + cache management |
-| `scripts/phase-c-workflow.js` | Analysis & reproduction workflow |
+| `phase-c-workflow.js` | Analysis & reproduction workflow |
 | `install.sh` | One-click installer |
 
 ## State Files (in /tmp)

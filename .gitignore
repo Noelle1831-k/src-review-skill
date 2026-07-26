@@ -1,0 +1,19 @@
+# SRC skill — state and temp files
+/tmp/src_*.json
+/tmp/src_*.py
+/tmp/src_attachments/
+/tmp/volc_*.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+__MACOSX/
+._*
+
+# IDE
+.vscode/
+.idea/

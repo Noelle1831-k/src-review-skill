@@ -46,7 +46,7 @@ for _ in range(15):
     time.sleep(0.5)
 
 # === Phase 1 ===
-print('[1/4] Application = volcano engine')
+print('[A1] Application = volcano engine')
 js(ws, 'document.getElementById("submit_app_name_input").click()')
 time.sleep(0.4)
 js(ws, '(function(){var s=document.getElementById("submit_app_name_input");var i=s.querySelector("input");i.focus();document.execCommand("insertText",false,"火山引擎")})()')
@@ -68,7 +68,7 @@ app_count = js(ws, 'document.getElementById("submit_app_name_input").querySelect
 print('  Apps selected: ' + str(app_count))
 
 # === Phase 2 ===
-print('[2/4] Status = pending review')
+print('[A2] Status = pending review')
 js(ws, 'document.getElementById("state_input").querySelector(".arco-select-suffix").click()')
 time.sleep(0.6)
 js(ws, '(function(){var p=document.getElementById("arco-select-popup-1");if(!p||!p.offsetParent)return;var lis=p.querySelectorAll("li.arco-select-option-wrapper");for(var i=0;i<lis.length;i++){if(lis[i].textContent.trim().indexOf("待审核")===0){var l=lis[i].querySelector("label.arco-checkbox");if(l){l.click();l.querySelector("input").dispatchEvent(new Event("change",{bubbles:true}))}}}})()')
@@ -76,7 +76,7 @@ js(ws, 'document.body.click()')
 time.sleep(1.5)
 
 # === Phase 3: 50/page ===
-print('[3/4] Page size = 50')
+print('[A3] Page size = 50')
 js(ws, '(function(){var pag=document.querySelector("[class*=pagination]");if(!pag)return;var sel=pag.querySelector(".arco-select");if(sel)sel.click()})()')
 time.sleep(0.5)
 
@@ -90,11 +90,40 @@ ws, page = get_src_ws()
 time.sleep(1)
 
 # === Phase 4 ===
-print('[4/4] Reading results')
+print('[A4] Reading results')
 
 pagination = js(ws, '(function(){var p=document.querySelector("[class*=pagination]");return p?p.textContent.trim().substring(0,200):"none"})()')
 
 rows = json.loads(js(ws, """(function() {
+    // Get column indices from table headers (robust to column reordering)
+    var headerMap = {};
+    var headers = document.querySelectorAll('.arco-table-th');
+    headers.forEach(function(th, i) {
+        var text = th.textContent.trim();
+        if (text.indexOf('漏洞编号') >= 0) headerMap.id = i;
+        else if (text.indexOf('漏洞标题') >= 0) headerMap.title = i;
+        else if (text.indexOf('填报应用') >= 0) headerMap.app = i;
+        else if (text.indexOf('漏洞类型') >= 0) headerMap.vulnType = i;
+        else if (text.indexOf('提交人') >= 0) headerMap.reporter = i;
+        else if (text.indexOf('提交团队') >= 0) headerMap.team = i;
+        else if (text.indexOf('漏洞等级') >= 0) headerMap.severity = i;
+        else if (text.indexOf('审核人') >= 0) headerMap.reviewer = i;
+        else if (text.indexOf('状态') >= 0) headerMap.status = i;
+        else if (text.indexOf('提交时间') >= 0) headerMap.submitTime = i;
+    });
+    // Fallback to known indices if headers not found
+    var idx = {
+        id: headerMap.id !== undefined ? headerMap.id : 1,
+        title: headerMap.title !== undefined ? headerMap.title : 2,
+        app: headerMap.app !== undefined ? headerMap.app : 3,
+        vulnType: headerMap.vulnType !== undefined ? headerMap.vulnType : 5,
+        reporter: headerMap.reporter !== undefined ? headerMap.reporter : 6,
+        team: headerMap.team !== undefined ? headerMap.team : 7,
+        severity: headerMap.severity !== undefined ? headerMap.severity : 8,
+        reviewer: headerMap.reviewer !== undefined ? headerMap.reviewer : 9,
+        status: headerMap.status !== undefined ? headerMap.status : 10,
+        submitTime: headerMap.submitTime !== undefined ? headerMap.submitTime : 16
+    };
     var result = [];
     document.querySelectorAll(".arco-table-tr").forEach(function(r) {
         if (!r.offsetParent || !r.querySelector("td")) return;
@@ -103,10 +132,10 @@ rows = json.loads(js(ws, """(function() {
         var texts = [];
         tds.forEach(function(td) { texts.push(td.textContent.trim()); });
         result.push({
-            id: texts[1], title: texts[2].substring(0, 80),
-            app: texts[3].substring(0, 40), vulnType: texts[5].substring(0, 40),
-            reporter: texts[6], team: texts[7], severity: texts[8],
-            reviewer: texts[9], status: texts[10], submitTime: texts[16]
+            id: texts[idx.id], title: texts[idx.title].substring(0, 80),
+            app: texts[idx.app].substring(0, 40), vulnType: texts[idx.vulnType].substring(0, 40),
+            reporter: texts[idx.reporter], team: texts[idx.team], severity: texts[idx.severity],
+            reviewer: texts[idx.reviewer], status: texts[idx.status], submitTime: texts[idx.submitTime]
         });
     });
     return JSON.stringify(result);

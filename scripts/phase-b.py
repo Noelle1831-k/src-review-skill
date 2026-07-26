@@ -11,6 +11,7 @@ Reads /tmp/src_ids.json, maintains /tmp/src_cache.json
 import json, urllib.request, time, sys, os, re, zipfile, shutil
 from datetime import datetime
 from websocket import create_connection
+import fitz as pymupdf
 
 CDP = 'http://127.0.0.1:9222'
 BATCH_SIZE = 5
@@ -124,6 +125,61 @@ def get_cookies(ws):
     return '; '.join(f"{c['name']}={c['value']}" for c in cookies)
 
 
+def extract_volc_cookies():
+    """Extract volcano engine console cookies and CSRF token via CDP.
+    Opens a volc console tab, extracts cookies, closes tab."""
+    try:
+        resp = json.loads(urllib.request.urlopen(
+            urllib.request.Request(f'{CDP}/json/new?url=https://console.volcengine.com', method='PUT')
+        ).read())
+        ws = create_connection(resp['webSocketDebuggerUrl'])
+        time.sleep(3)
+
+        # Wait for page load
+        for _ in range(20):
+            try:
+                title = js(ws, 'document.title') or ''
+                if title and 'SSO' not in title:
+                    break
+            except:
+                pass
+            time.sleep(0.5)
+        time.sleep(2)
+
+        # Extract cookies
+        ws.send(json.dumps({'id': 50, 'method': 'Network.getCookies',
+            'params': {'urls': ['https://console.volcengine.com']}}))
+        resp = json.loads(ws.recv())
+        cookies = resp.get('result', {}).get('cookies', [])
+
+        # Extract CSRF token
+        csrf = ''
+        for c in cookies:
+            if c['name'] == 'csrfToken':
+                csrf = c['value']
+                break
+
+        # Save
+        cookie_str = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+        with open('/tmp/volc_cookies.txt', 'w') as f:
+            f.write(cookie_str)
+        with open('/tmp/volc_csrf.txt', 'w') as f:
+            f.write(csrf)
+
+        # Close tab
+        try:
+            ws.send(json.dumps({'id': 99, 'method': 'Page.close'}))
+            json.loads(ws.recv())
+        except:
+            pass
+        ws.close()
+
+        return len(cookies)
+    except Exception as e:
+        print(f'  [WARN] Failed to extract volc cookies: {e}')
+        return 0
+
+
 # ============================================================
 #  Attachment download (Phase B1)
 # ============================================================
@@ -216,7 +272,6 @@ def extract_zips(folder):
 
 
 def convert_pdfs_in_folder(folder):
-    import fitz as pymupdf
     converted = []
     for root, dirs, files in os.walk(folder):
         if '__MACOSX' in root:
@@ -580,6 +635,13 @@ if new_ids:
 else:
     print('\n  (no fetching needed)')
 
+# Save new IDs for Phase C handoff
+if new_ids:
+    with open('/tmp/src_new_ids.json', 'w') as f:
+        json.dump({'new_ids': new_ids, 'count': len(new_ids),
+                   'timestamp': datetime.now().isoformat(timespec='seconds')}, f, ensure_ascii=False)
+    print(f'  New IDs saved to /tmp/src_new_ids.json')
+
 # --- Phase B1.5: Refresh attachments for cached IDs ---
 cache = load_cache()  # ensure cache is loaded for B1.5 reference
 ATTACH_REFRESH_COOLDOWN_H = 4  # don't re-check attachments within 4 hours
@@ -643,6 +705,11 @@ if cached_results:
             print(f'  Total new attachments: {new_attach_total}')
     else:
         print(f'\n--- Phase B1.5: Attachment refresh skipped (all within {ATTACH_REFRESH_COOLDOWN_H}h cooldown) ---')
+
+# Extract volc console cookies for Phase C reproduction
+n_volc = extract_volc_cookies()
+if n_volc > 0:
+    print(f'\n  Volc cookies extracted: {n_volc} cookies saved to /tmp/volc_cookies.txt')
 
 # --- Phase B2: Post-process attachments ---
 n_unzipped, n_converted = process_attachments()

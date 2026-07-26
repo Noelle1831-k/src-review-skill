@@ -52,7 +52,9 @@ var c1Prompt = '你是安全漏洞分析专家。筛选出利用需要"纯随机
   '2. 不可枚举/不可爆破，只能靠受害者主动泄露\n' +
   '3. 参数没有窃取价值 (不像 AK/SK/密码)\n\n' +
   '不筛: AK/SK/cookie/密码 (有窃取价值) | 可枚举ID | 公开参数\n\n' +
-  '读取 /tmp/src_details.json 中以下 IDs 的 body_preview，判断每个漏洞。返回 {passed, excluded}。\n\n' +
+  '读取 /tmp/src_details.json 中以下 IDs 的 body_preview。\n' +
+  '同时检查 /tmp/src_cache.json — 跳过已 reproduced=true 的ID（不处理，归入 passed）。\n' +
+  '判断每个未复现的漏洞。返回 {passed, excluded}。\n\n' +
   'IDs: ' + JSON.stringify(allIds)
 
 var c1Result = await agent(c1Prompt, { label: 'c1-hard-params', schema: SCHEMA_C12 })
@@ -76,7 +78,9 @@ if (c2Input.length > 0) {
     '4. 需等待审批或后台任务\n' +
     '5. 复杂表单(5+字段,非单API可替代)\n\n' +
     '不筛: 直接POST API | 1-2点击 | 访问已有页面无需创建资源\n\n' +
-    '读取 /tmp/src_details.json 中以下 IDs 的 body_preview，判断。返回 {passed, excluded}。\n\n' +
+    '读取 /tmp/src_details.json 中以下 IDs 的 body_preview。\n' +
+    '同时检查 /tmp/src_cache.json — 跳过已 reproduced=true 的ID。\n' +
+    '判断每个未复现的漏洞。返回 {passed, excluded}。\n\n' +
     'IDs: ' + JSON.stringify(c2Input)
 
   c2Result = await agent(c2Prompt, { label: 'c2-click-heavy', schema: SCHEMA_C12 })
@@ -98,24 +102,29 @@ if (c3Input.length === 0) {
 } else {
   log('Dispatching ' + c3Input.length + ' agents...')
 
-  c3Results = await pipeline(
-    c3Input,
-    function(vid) {
-      return agent(
-        '复现漏洞 ' + vid + '。操作约束。\n' +
-        '1. 读 /tmp/src_details.json ID=' + vid + ' 的 body_preview\n' +
-        '2. 读 /tmp/src_attachments/ 下该漏洞 .md (如有)\n' +
-        '3. 优先用已有PoC，无则自行生成\n' +
-        '4. 允许: 读操作 + 非破坏性写入 + 他人数据最小验证修改(不改配置) + 验证性RCE/逃逸/提权(whoami/id/hostname即可)\n' +
-        '5. 禁止: DELETE/DROP/TRUNCATE + 覆盖他人配置/核心数据 + 验证后进一步利用\n' +
-        '6. SQLi: 可SELECT+INSERT无害标记, 禁UPDATE/DELETE他人行\n' +
-        '7. SSRF: 验证用icanhazip.com/httpbin.org, 内网可达即止\n' +
-        '8. Cookie在/tmp/volc_cookies.txt, CSRF在/tmp/volc_csrf.txt\n' +
-        '返回: {id, status, evidence, poc_command, risk_assessment, notes}',
-        { label: 'repro-' + vid, schema: SCHEMA_REPRO }
-      )
-    }
-  )
+  try {
+    c3Results = await pipeline(
+      c3Input,
+      function(vid) {
+        return agent(
+          '复现漏洞 ' + vid + '。操作约束。\n' +
+          '1. 读 /tmp/src_details.json ID=' + vid + ' 的 body_preview\n' +
+          '2. 读 /tmp/src_attachments/ 下该漏洞 .md (如有)\n' +
+          '3. 优先用已有PoC，无则自行生成\n' +
+          '4. 允许: 读操作 + 非破坏性写入 + 他人数据最小验证修改(不改配置) + 验证性RCE/逃逸/提权(whoami/id/hostname即可)\n' +
+          '5. 禁止: DELETE/DROP/TRUNCATE + 覆盖他人配置/核心数据 + 验证后进一步利用\n' +
+          '6. SQLi: 可SELECT+INSERT无害标记, 禁UPDATE/DELETE他人行\n' +
+          '7. SSRF: 验证用icanhazip.com/httpbin.org, 内网可达即止\n' +
+          '8. Cookie在/tmp/volc_cookies.txt, CSRF在/tmp/volc_csrf.txt\n' +
+          '返回: {id, status, evidence, poc_command, risk_assessment, notes}',
+          { label: 'repro-' + vid, schema: SCHEMA_REPRO }
+        )
+      }
+    )
+  } catch (e) {
+    log('C3 pipeline error (continuing with partial results): ' + (e.message || e))
+    c3Results = []
+  }
 }
 
 // ============================================================
@@ -127,16 +136,38 @@ var c1Excluded = c1Result.excluded
 var c2Excluded = c2Result.excluded
 var reproSuccess = c3Results ? c3Results.filter(Boolean).filter(function(r) { return r.status === 'SUCCESS' }).map(function(r) { return r.id }) : []
 
-var statePrompt = '用 python3 -c 更新 2 个 JSON 文件:\n\n' +
-  '## 1. /tmp/src_excluded.json\n' +
-  '读取, 将以下 C1 筛除项写入 hard_params: ' + JSON.stringify(c1Excluded) + '\n' +
-  '将以下 C2 筛除项写入 click_heavy: ' + JSON.stringify(c2Excluded) + '\n' +
-  '格式: {"hard_params": {"ID": {"reason":"...","excluded_at":"now"}}, "click_heavy": {...}}\n' +
-  '用 from datetime import datetime; now = datetime.now().isoformat(timespec="seconds") 获取时间\n\n' +
-  '## 2. /tmp/src_cache.json\n' +
-  '读取, 对以下IDs设 cache[vid]["reproduced"]=True: ' + JSON.stringify(reproSuccess) + '\n' +
-  '已有的 reproduced 字段不变, 保存\n\n' +
-  '用 Bash 执行 python3 -c "..." 完成以上所有操作'
+var ts = new Date().toISOString().replace('T', ' ').substring(0, 19)
+var statePrompt = '用 Bash 执行以下 python3 命令更新 JSON 文件。**只执行，不要修改代码。**\n\n' +
+  'python3 -c "\n' +
+  'import json\n' +
+  'from datetime import datetime\n' +
+  'now = datetime.now().isoformat(timespec=\"seconds\")\n' +
+  '\n' +
+  '# 1. Update /tmp/src_excluded.json\n' +
+  'with open(\"/tmp/src_excluded.json\") as f:\n' +
+  '    exc = json.load(f)\n' +
+  'c1_items = ' + JSON.stringify(c1Excluded) + '\n' +
+  'c2_items = ' + JSON.stringify(c2Excluded) + '\n' +
+  'for item in c1_items:\n' +
+  '    exc.setdefault(\"hard_params\", {})[item[\"id\"]] = {\"reason\": item[\"reason\"], \"excluded_at\": now}\n' +
+  'for item in c2_items:\n' +
+  '    exc.setdefault(\"click_heavy\", {})[item[\"id\"]] = {\"reason\": item[\"reason\"], \"excluded_at\": now}\n' +
+  'with open(\"/tmp/src_excluded.json\", \"w\") as f:\n' +
+  '    json.dump(exc, f, ensure_ascii=False, indent=2)\n' +
+  '\n' +
+  '# 2. Update /tmp/src_cache.json\n' +
+  'with open(\"/tmp/src_cache.json\") as f:\n' +
+  '    cache = json.load(f)\n' +
+  'repro_ids = ' + JSON.stringify(reproSuccess) + '\n' +
+  'for vid in repro_ids:\n' +
+  '    if vid in cache:\n' +
+  '        cache[vid][\"reproduced\"] = True\n' +
+  'with open(\"/tmp/src_cache.json\", \"w\") as f:\n' +
+  '    json.dump(cache, f, ensure_ascii=False, indent=2)\n' +
+  '\n' +
+  'print(f\"excluded.json: +{len(c1_items)} hard_params, +{len(c2_items)} click_heavy\")\n' +
+  'print(f\"cache.json: +{len(repro_ids)} reproduced\")\n' +
+  '"'
 
 await agent(statePrompt, { label: 'update-state' })
 

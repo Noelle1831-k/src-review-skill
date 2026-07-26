@@ -19,13 +19,14 @@ description: >
 
 | 文件 | 用途 |
 |------|------|
-| `/tmp/src_ids.json` | 当前待审核漏洞 ID 列表（Phase A 输出） |
+| `/tmp/src_ids.json` | 当前待审核漏洞 ID 列表（Phase A 输出，含 `all_ids`/`all_rows`） |
 | `/tmp/src_details.json` | 详情页正文 + 附件索引（Phase B 输出） |
-| `/tmp/src_cache.json` | 详情抓取缓存，含 `reproduced` 字段 |
-| `/tmp/src_excluded.json` | 被 Phase C 筛掉的漏洞，下次自动跳过 |
+| `/tmp/src_cache.json` | 详情抓取缓存，含 `reproduced`/`attachments_checked_at`/`attachment_names` 字段 |
+| `/tmp/src_excluded.json` | 被 Phase C 筛掉的漏洞，含 `excluded_at` 时间戳 |
+| `/tmp/src_new_ids.json` | Phase B 输出的 new IDs，供 Phase C 使用 |
 | `/tmp/src_attachments/` | 附件下载目录 |
-| `/tmp/volc_cookies.txt` | 火山引擎 console cookie（CDP 提取） |
-| `/tmp/volc_csrf.txt` | CSRF token（CDP 提取） |
+| `/tmp/volc_cookies.txt` | 火山引擎 console cookie（Phase B 自动从 CDP 提取） |
+| `/tmp/volc_csrf.txt` | CSRF token（Phase B 自动从 CDP 提取） |
 
 ### cache.json schema
 
@@ -37,7 +38,9 @@ description: >
     "fetched_at": "2026-07-26T22:00:00+08:00",
     "has_attachments": true,
     "body_size": 5000,
-    "reproduced": true
+    "reproduced": true,
+    "attachments_checked_at": 1753549200.0,
+    "attachment_names": ["report.pdf"]
   }
 }
 ```
@@ -184,14 +187,17 @@ CACHE_FILE = '/tmp/src_cache.json'
 def get_src_ws():
     tabs = json.loads(urllib.request.urlopen(CDP + '/json').read())
     pages = [t for t in tabs if t['type'] == 'page' and 'src.bytedance.net' in t.get('url', '')]
-    if not pages:
+    # Prefer the home page (not detail pages)
+    home = [t for t in pages if '/home' in t.get('url', '') or t.get('url', '').endswith('src.bytedance.net')]
+    if not home:
         urllib.request.urlopen(urllib.request.Request(CDP + '/json/new?url=https://src.bytedance.net/home', method='PUT'))
         time.sleep(4)
         tabs = json.loads(urllib.request.urlopen(CDP + '/json').read())
         pages = [t for t in tabs if t['type'] == 'page' and 'src.bytedance.net' in t.get('url', '')]
-    if not pages:
+        home = [t for t in pages if '/home' in t.get('url', '') or t.get('url', '').endswith('src.bytedance.net')]
+    if not home:
         sys.exit('No SRC tab - please login first')
-    return create_connection(pages[0]['webSocketDebuggerUrl']), pages[0]
+    return create_connection(home[0]['webSocketDebuggerUrl']), home[0]
 
 def js(ws, expr):
     ws.send(json.dumps({'id': 1, 'method': 'Runtime.evaluate', 'params': {
@@ -219,7 +225,7 @@ for _ in range(15):
     time.sleep(0.5)
 
 # === Phase 1 ===
-print('[1/4] Application = volcano engine')
+print('[A1] Application = volcano engine')
 js(ws, 'document.getElementById("submit_app_name_input").click()')
 time.sleep(0.4)
 js(ws, '(function(){var s=document.getElementById("submit_app_name_input");var i=s.querySelector("input");i.focus();document.execCommand("insertText",false,"火山引擎")})()')
@@ -241,7 +247,7 @@ app_count = js(ws, 'document.getElementById("submit_app_name_input").querySelect
 print('  Apps selected: ' + str(app_count))
 
 # === Phase 2 ===
-print('[2/4] Status = pending review')
+print('[A2] Status = pending review')
 js(ws, 'document.getElementById("state_input").querySelector(".arco-select-suffix").click()')
 time.sleep(0.6)
 js(ws, '(function(){var p=document.getElementById("arco-select-popup-1");if(!p||!p.offsetParent)return;var lis=p.querySelectorAll("li.arco-select-option-wrapper");for(var i=0;i<lis.length;i++){if(lis[i].textContent.trim().indexOf("待审核")===0){var l=lis[i].querySelector("label.arco-checkbox");if(l){l.click();l.querySelector("input").dispatchEvent(new Event("change",{bubbles:true}))}}}})()')
@@ -249,7 +255,7 @@ js(ws, 'document.body.click()')
 time.sleep(1.5)
 
 # === Phase 3: 50/page ===
-print('[3/4] Page size = 50')
+print('[A3] Page size = 50')
 js(ws, '(function(){var pag=document.querySelector("[class*=pagination]");if(!pag)return;var sel=pag.querySelector(".arco-select");if(sel)sel.click()})()')
 time.sleep(0.5)
 
@@ -263,7 +269,7 @@ ws, page = get_src_ws()
 time.sleep(1)
 
 # === Phase 4 ===
-print('[4/4] Reading results')
+print('[A4] Reading results')
 
 pagination = js(ws, '(function(){var p=document.querySelector("[class*=pagination]");return p?p.textContent.trim().substring(0,200):"none"})()')
 
@@ -306,8 +312,10 @@ if os.path.exists(CACHE_FILE):
 # Collect IDs to exclude
 excluded_ids = set()
 for category in ('hard_params', 'click_heavy'):
-    for vid in (excluded.get(category, {}) or {}):
-        excluded_ids.add(vid)
+    cat = excluded.get(category, {})
+    if isinstance(cat, dict):
+        for vid in cat:
+            excluded_ids.add(vid)
 
 reproduced_ids = set(vid for vid, v in cache.items() if v.get('reproduced'))
 
@@ -331,17 +339,20 @@ for category in ('hard_params', 'click_heavy'):
         if not excluded[category]:
             del excluded[category]
 
-# Also clean stale reproduced from cache
-stale_cache = [vid for vid in cache if vid not in current_ids and cache[vid].get('reproduced')]
-for vid in stale_cache:
+# Also clean stale reproduced from cache (vuln no longer in pending review)
+cache_changed = False
+stale_repro = [vid for vid in cache if vid not in current_ids and cache[vid].get('reproduced')]
+for vid in stale_repro:
     cache[vid]['reproduced'] = False
-if stale_cache:
-    print(f'  Reset reproduced for {len(stale_cache)} stale cache entries')
+    cache_changed = True
+if stale_repro:
+    print(f'  Reset reproduced for {len(stale_repro)} stale cache entries')
 
 with open(EXCLUDED_FILE, 'w') as f:
     json.dump(excluded, f, ensure_ascii=False, indent=2)
-with open(CACHE_FILE, 'w') as f:
-    json.dump(cache, f, ensure_ascii=False, indent=2)
+if cache_changed:
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
 
 # Print summary
 print('\n' + '=' * 80)
@@ -361,9 +372,12 @@ for r in filtered_rows:
 # Save IDs
 ids = [r['id'] for r in filtered_rows]
 with open('/tmp/src_ids.json', 'w') as f:
-    json.dump({'count': len(ids), 'ids': ids, 'rows': filtered_rows,
-               'skipped_excluded': len(excluded_ids),
-               'skipped_reproduced': len(reproduced_ids)}, f, ensure_ascii=False)
+    json.dump({
+        'count': len(ids), 'ids': ids, 'rows': filtered_rows,
+        'all_count': len(rows), 'all_ids': [r['id'] for r in rows], 'all_rows': rows,
+        'skipped_excluded': len(excluded_ids),
+        'skipped_reproduced': len(reproduced_ids)
+    }, f, ensure_ascii=False)
 print('IDs saved to /tmp/src_ids.json (' + str(len(ids)) + ' vulns, ' + str(len(all_skip)) + ' skipped)')
 ```
 
