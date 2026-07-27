@@ -1,13 +1,20 @@
 ---
 name: src-review
 description: >
-  Bytedance SRC vulnerability review automation. Filters volcano engine apps with 待审核 status,
-  then dispatches parallel sub-agents to fetch each vulnerability's detail page.
+  Bytedance SRC vulnerability review automation (combined A→B→C flow).
+  Now split into three standalone skills: src-list, src-cache, src-reproduce.
   Trigger: "看看今天我要审核哪些漏洞", "帮我看SRC待审核", "SRC审核清单".
   Depends on chrome-debug skill for browser automation.
 ---
 
-# SRC 审核清单
+# SRC 审核清单（全流程）
+
+> **已拆分为三个独立技能：**
+> - [[src-list]] — "SRC列表"：Phase A 列表收集
+> - [[src-cache]] — "更新缓存"：Phase B 详情抓取 + 缓存更新
+> - [[src-reproduce]] — "批量复现"：Phase C 分析与复现
+>
+> 本文件保留完整流程文档作为参考。
 
 自动打开 SRC 管理平台，筛选火山引擎应用 + 待审核状态的漏洞，并为每条漏洞打开详情页供后续审核。
 

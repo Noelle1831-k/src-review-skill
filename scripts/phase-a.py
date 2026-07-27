@@ -187,7 +187,7 @@ for category in ('hard_params', 'click_heavy'):
             del excluded[category][vid]
         if stale_excluded:
             print(f'  Cleaned {len(stale_excluded)} stale entries from excluded.{category}')
-        if not excluded[category]:
+        if category in excluded and not excluded[category]:
             del excluded[category]
 
 # Clean stale reproduced flags from cache (vuln no longer in pending review)
